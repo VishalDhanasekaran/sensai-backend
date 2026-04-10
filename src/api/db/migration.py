@@ -27,6 +27,7 @@ from api.config import (
     code_drafts_table_name,
     integrations_table_name,
     assignment_table_name,
+    llm_response_cache_table_name,
 )
 
 
@@ -185,6 +186,19 @@ async def create_feedback_tables_migration():
         await conn.commit()
 
 
+async def create_llm_response_cache_table_migration():
+    """
+    Migration: Creates the llm_response_cache table if it doesn't exist.
+    """
+    async with get_new_db_connection() as conn:
+        cursor = await conn.cursor()
+        from api.db import create_llm_response_cache_table
+
+        await create_llm_response_cache_table(cursor)
+
+        await conn.commit()
+
+
 async def cleanup_invalid_chat_history():
     """
     Migration: Cleanup chat history records with empty or invalid AI responses for assignments.
@@ -237,14 +251,14 @@ async def cleanup_invalid_chat_history():
 
         # Soft delete invalid messages
         if invalid_message_ids:
-            placeholders = ','.join('?' * len(invalid_message_ids))
+            placeholders = ",".join("?" * len(invalid_message_ids))
             await cursor.execute(
                 f"""
                 UPDATE {chat_history_table_name}
                 SET deleted_at = CURRENT_TIMESTAMP
                 WHERE id IN ({placeholders}) AND deleted_at IS NULL
                 """,
-                invalid_message_ids
+                invalid_message_ids,
             )
 
             print(f"Cleaned up {len(invalid_message_ids)} invalid chat history records")
@@ -256,3 +270,4 @@ async def run_migrations():
     await create_bq_sync_table_migration()
     await create_feedback_tables_migration()
     await cleanup_invalid_chat_history()
+    await create_llm_response_cache_table_migration()
