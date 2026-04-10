@@ -63,6 +63,7 @@ assignment_table_name = "assignment"
 feedback_attempts_table_name = "feedback_attempts"
 feedback_items_table_name = "feedback_items"
 prompt_cache_stats_table_name = "prompt_cache_stats"
+llm_response_cache_table_name = "llm_response_cache"
 
 UPLOAD_FOLDER_NAME = "uploads"
 

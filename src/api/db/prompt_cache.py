@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from api.utils.db import get_new_db_connection
-from api.config import prompt_cache_stats_table_name
+from api.config import prompt_cache_stats_table_name, llm_response_cache_table_name
 
 
 async def log_prompt_cache_stat(
@@ -74,3 +74,41 @@ async def get_prompt_cache_stats() -> dict:
         "hit_rate": hits / total if total > 0 else 0,
         "by_model": by_model,
     }
+
+
+async def get_cached_response(cache_key: str) -> tuple[str | None, str | None]:
+    async with get_new_db_connection() as conn:
+        cursor = await conn.cursor()
+        await cursor.execute(
+            f"""SELECT response_text, model FROM {llm_response_cache_table_name}
+                WHERE cache_key = ?""",
+            (cache_key,),
+        )
+        row = await cursor.fetchone()
+        if row:
+            return row[0], row[1]
+        return None, None
+
+
+async def save_response_to_cache(cache_key: str, response_text: str, model: str):
+    async with get_new_db_connection() as conn:
+        cursor = await conn.cursor()
+        await cursor.execute(
+            f"""INSERT OR REPLACE INTO {llm_response_cache_table_name}
+                (cache_key, response_text, model)
+                VALUES (?, ?, ?)""",
+            (cache_key, response_text, model),
+        )
+        await conn.commit()
+
+
+async def cleanup_old_llm_response_cache(hours: int = 48):
+    cutoff = datetime.now() - timedelta(hours=hours)
+    async with get_new_db_connection() as conn:
+        cursor = await conn.cursor()
+        await cursor.execute(
+            f"""DELETE FROM {llm_response_cache_table_name}
+                WHERE created_at < ?""",
+            (cutoff.isoformat(),),
+        )
+        await conn.commit()

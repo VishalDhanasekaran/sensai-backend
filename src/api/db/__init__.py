@@ -35,6 +35,7 @@ from api.config import (
     feedback_attempts_table_name,
     feedback_items_table_name,
     prompt_cache_stats_table_name,
+    llm_response_cache_table_name,
 )
 from api.db.migration import run_migrations
 
@@ -738,6 +739,26 @@ async def create_prompt_cache_stats_table(cursor):
     )
 
 
+async def create_llm_response_cache_table(cursor):
+    await cursor.execute(
+        f"""CREATE TABLE IF NOT EXISTS {llm_response_cache_table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cache_key TEXT NOT NULL UNIQUE,
+                response_text TEXT NOT NULL,
+                model TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_llm_response_cache_cache_key ON {llm_response_cache_table_name} (cache_key)"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_llm_response_cache_created_at ON {llm_response_cache_table_name} (created_at)"""
+    )
+
+
 async def init_db():
     # Ensure the database folder exists
     db_folder = os.path.dirname(sqlite_db_path)
@@ -811,6 +832,8 @@ async def init_db():
             await create_feedback_tables(cursor)
 
             await create_prompt_cache_stats_table(cursor)
+
+            await create_llm_response_cache_table(cursor)
 
             await create_bq_sync_table(cursor)
 

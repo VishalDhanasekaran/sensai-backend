@@ -11,7 +11,12 @@ from langchain_core.output_parsers import PydanticOutputParser
 import openai
 import instructor
 from api.utils.logging import logger
-from api.db.prompt_cache import log_prompt_cache_stat
+from api.db.prompt_cache import (
+    log_prompt_cache_stat,
+    get_cached_response,
+    save_response_to_cache,
+)
+
 
 def _stable_hash_payload(payload: Any) -> str:
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
@@ -118,7 +123,9 @@ def _prepare_api_kwargs(
     """
     api_kwargs = dict(kwargs)
 
-    user_cache_key = _normalize_prompt_cache_key(api_kwargs.pop("prompt_cache_key", None))
+    user_cache_key = _normalize_prompt_cache_key(
+        api_kwargs.pop("prompt_cache_key", None)
+    )
     api_kwargs.pop("prompt_cache_retention", None)
 
     prompt_cache_key: str | None = None
@@ -140,6 +147,17 @@ def is_reasoning_model(model: str) -> bool:
             return True
 
     return False
+
+
+def _get_user_message_cache_key(messages: list[dict]) -> str | None:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if content:
+                return f"u:{_stable_hash_payload(content)}"[
+                    :MAX_PROMPT_CACHE_KEY_LENGTH
+                ]
+    return None
 
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=5, factor=2)
@@ -320,6 +338,21 @@ async def run_llm_with_openai(
     prompt_cache_retention: Literal["in_memory", "24h"] = "in_memory",
     **kwargs,
 ):
+    user_cache_key = _get_user_message_cache_key(messages)
+
+    if user_cache_key:
+        cached_response_text, cached_model = await get_cached_response(user_cache_key)
+        if cached_response_text is not None:
+            logger.info(
+                "LLM response cache hit",
+                extra={"cache_key": user_cache_key, "model": cached_model},
+            )
+            if isinstance(response_model, type) and issubclass(
+                response_model, BaseModel
+            ):
+                return response_model.model_validate_json(cached_response_text)
+            return cached_response_text
+
     client = AsyncOpenAI()
 
     if not kwargs and not is_reasoning_model(model):
@@ -344,6 +377,11 @@ async def run_llm_with_openai(
         )
 
         _log_cached_tokens(response, model, prompt_cache_key)
+
+        if user_cache_key:
+            response_json = response.output_parsed.model_dump_json()
+            await save_response_to_cache(user_cache_key, response_json, model)
+
         return response.output_parsed
 
     if "-audio-" in model:
@@ -356,6 +394,12 @@ async def run_llm_with_openai(
         )
 
         _log_cached_tokens(response, model, prompt_cache_key)
+
+        if user_cache_key:
+            await save_response_to_cache(
+                user_cache_key, response.choices[0].message.content, model
+            )
+
         return response.choices[0].message.content
 
     response = await client.chat.completions.parse(
@@ -368,4 +412,9 @@ async def run_llm_with_openai(
     )
 
     _log_cached_tokens(response, model, prompt_cache_key)
+
+    if user_cache_key:
+        response_json = response.choices[0].message.parsed.model_dump_json()
+        await save_response_to_cache(user_cache_key, response_json, model)
+
     return response.choices[0].message.parsed

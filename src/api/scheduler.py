@@ -1,6 +1,9 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from api.db.task import publish_scheduled_tasks
-from api.db.prompt_cache import cleanup_old_prompt_cache_stats
+from api.db.prompt_cache import (
+    cleanup_old_prompt_cache_stats,
+    cleanup_old_llm_response_cache,
+)
 from api.cron import (
     check_memory_and_raise_alert,
 )
@@ -55,3 +58,9 @@ async def check_memory():
 @with_error_reporting("prompt_cache_cleanup")
 async def cleanup_prompt_cache():
     await cleanup_old_prompt_cache_stats(hours=48)
+
+
+@scheduler.scheduled_job("interval", hours=1)
+@with_error_reporting("llm_response_cache_cleanup")
+async def cleanup_llm_response_cache():
+    await cleanup_old_llm_response_cache(hours=48)
