@@ -653,12 +653,21 @@ async def init_db():
     if not os.path.exists(db_folder):
         os.makedirs(db_folder)
 
-    if not exists(sqlite_db_path):
-        # only set the defaults the first time
-        set_db_defaults()
-    else:
-        await run_migrations()
-        return
+    if exists(sqlite_db_path):
+        # If the DB already has core tables, only run migrations.
+        # If the file exists but schema is missing/corrupt, recreate it.
+        async with get_new_db_connection() as conn:
+            cursor = await conn.cursor()
+            has_users_table = await check_table_exists(users_table_name, cursor)
+
+        if has_users_table:
+            await run_migrations()
+            return
+
+        os.remove(sqlite_db_path)
+
+    # Set SQLite defaults when creating/recreating the DB file
+    set_db_defaults()
 
     async with get_new_db_connection() as conn:
         cursor = await conn.cursor()

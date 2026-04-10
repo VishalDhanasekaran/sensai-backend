@@ -181,6 +181,14 @@ async def cleanup_invalid_chat_history():
     async with get_new_db_connection() as conn:
         cursor = await conn.cursor()
 
+        # Older/partial DBs may not have this table yet
+        await cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (chat_history_table_name,),
+        )
+        if not await cursor.fetchone():
+            return
+
         # Get all assistant messages for assignments only (task_id IS NOT NULL)
         await cursor.execute(
             f"""

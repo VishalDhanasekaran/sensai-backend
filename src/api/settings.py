@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     slack_course_created_webhook_url: str | None = None
     slack_usage_stats_webhook_url: str | None = None
     slack_alert_webhook_url: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_public_key: str | None = None
+    langfuse_base_url: str | None = None
+    langfuse_host: str | None = None
+    langfuse_tracing_environment: str | None = None
+
     model_config = SettingsConfigDict(env_file=join(root_dir, ".env"), extra="ignore")
 
 
@@ -46,6 +52,19 @@ def get_settings():
 
 
 settings = get_settings()
+
+if (
+    settings.langfuse_public_key
+    and settings.langfuse_secret_key
+    and settings.langfuse_base_url
+):
+    os.environ["LANGFUSE_PUBLIC_KEY"] = settings.langfuse_public_key
+    os.environ["LANGFUSE_SECRET_KEY"] = settings.langfuse_secret_key
+    os.environ["LANGFUSE_HOST"] = settings.langfuse_base_url
+    if settings.langfuse_tracing_environment:
+        os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = (
+            settings.langfuse_tracing_environment
+        )
 
 if settings.openai_api_key:
     os.environ["OPENAI_API_KEY"] = settings.openai_api_key
