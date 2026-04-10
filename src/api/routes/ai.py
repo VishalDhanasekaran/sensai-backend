@@ -40,6 +40,10 @@ from api.db.feedback import (
     get_feedback_items_for_attempt,
     get_feedback_attempts,
 )
+from api.db.prompt_cache import (
+    get_cached_response,
+    save_response_to_cache,
+)
 from api.db.utils import construct_description_from_blocks
 from api.utils.s3 import (
     download_file_from_s3_as_bytes,
@@ -51,10 +55,22 @@ from api.db.user import get_user_first_name
 from langfuse import get_client, observe
 from api.prompts import compile_prompt
 from api.prompts.router import ROUTER_SYSTEM_PROMPT, ROUTER_USER_PROMPT
-from api.prompts.rewrite_query import REWRITE_QUERY_SYSTEM_PROMPT, REWRITE_QUERY_USER_PROMPT
-from api.prompts.objective_question import OBJECTIVE_QUESTION_SYSTEM_PROMPT, OBJECTIVE_QUESTION_USER_PROMPT
-from api.prompts.subjective_question import SUBJECTIVE_QUESTION_SYSTEM_PROMPT, SUBJECTIVE_QUESTION_USER_PROMPT
-from api.prompts.doubt_solving import DOUBT_SOLVING_SYSTEM_PROMPT, DOUBT_SOLVING_USER_PROMPT
+from api.prompts.rewrite_query import (
+    REWRITE_QUERY_SYSTEM_PROMPT,
+    REWRITE_QUERY_USER_PROMPT,
+)
+from api.prompts.objective_question import (
+    OBJECTIVE_QUESTION_SYSTEM_PROMPT,
+    OBJECTIVE_QUESTION_USER_PROMPT,
+)
+from api.prompts.subjective_question import (
+    SUBJECTIVE_QUESTION_SYSTEM_PROMPT,
+    SUBJECTIVE_QUESTION_USER_PROMPT,
+)
+from api.prompts.doubt_solving import (
+    DOUBT_SOLVING_SYSTEM_PROMPT,
+    DOUBT_SOLVING_USER_PROMPT,
+)
 from api.prompts.assignment import ASSIGNMENT_SYSTEM_PROMPT, ASSIGNMENT_USER_PROMPT
 
 router = APIRouter()
@@ -303,9 +319,7 @@ def format_ai_scorecard_report(scorecard: Any) -> str:
             continue
 
         category = (
-            criterion.get("category")
-            or criterion.get("criterion_name")
-            or "Criterion"
+            criterion.get("category") or criterion.get("criterion_name") or "Criterion"
         )
         score = criterion.get("score", "")
         feedback = criterion.get("feedback") or {}
@@ -335,7 +349,7 @@ def convert_scorecard_to_prompt(scorecard: list[dict]) -> str:
     for index, criterion in enumerate(scorecard["criteria"]):
         criterion_name = criterion["name"].replace('"', "")
         scoring_criteria_as_prompt.append(
-            f"""Criterion {index + 1}:\n**Name**: **{criterion_name}** [min_score: {criterion['min_score']}, max_score: {criterion['max_score']}, pass_score: {criterion.get('pass_score', criterion['max_score'])}]\n\n{criterion['description']}"""
+            f"""Criterion {index + 1}:\n**Name**: **{criterion_name}** [min_score: {criterion["min_score"]}, max_score: {criterion["max_score"]}, pass_score: {criterion.get("pass_score", criterion["max_score"])}]\n\n{criterion["description"]}"""
         )
 
     return "\n\n".join(scoring_criteria_as_prompt)
@@ -432,7 +446,9 @@ def _extract_evidence_from_feedback(feedback_text: str) -> List[Dict]:
 
     evidence: List[Dict] = []
 
-    line_matches = re.findall(r"(?:line\s*\d+|L\d+)", feedback_text, flags=re.IGNORECASE)
+    line_matches = re.findall(
+        r"(?:line\s*\d+|L\d+)", feedback_text, flags=re.IGNORECASE
+    )
     for line_match in line_matches[:2]:
         evidence.append(
             {
@@ -532,7 +548,11 @@ def _extract_code_line_evidence_from_submission(
         return []
 
     keywords = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", feedback_text.lower())
-    keywords = [keyword for keyword in keywords if keyword not in {"line", "test", "case", "score"}]
+    keywords = [
+        keyword
+        for keyword in keywords
+        if keyword not in {"line", "test", "case", "score"}
+    ]
 
     if not keywords:
         return []
@@ -627,8 +647,7 @@ def _append_external_evidence_to_submission(
 
     return (
         f"{submission}\n\n"
-        "Execution Evidence (from automated tests/runtime):\n"
-        + "\n".join(lines)
+        "Execution Evidence (from automated tests/runtime):\n" + "\n".join(lines)
     )
 
 
@@ -721,12 +740,18 @@ def _derive_next_step(
 
     if "complexity" in feedback_lower or "o(" in feedback_lower:
         actions.append("Refactor the logic to meet the expected time complexity.")
-    elif "edge case" in feedback_lower or "empty" in feedback_lower or "null" in feedback_lower:
+    elif (
+        "edge case" in feedback_lower
+        or "empty" in feedback_lower
+        or "null" in feedback_lower
+    ):
         actions.append("Add explicit handling for edge-case inputs before main logic.")
     elif wrong_feedback:
         focus = _split_sentences(wrong_feedback)
         if focus:
-            actions.append(f"Revise the solution to resolve: {focus[0][:140].rstrip('.')}.")
+            actions.append(
+                f"Revise the solution to resolve: {focus[0][:140].rstrip('.')}."
+            )
 
     if by_type.get("code_line"):
         line_refs = ", ".join(by_type["code_line"][:2])
@@ -739,7 +764,9 @@ def _derive_next_step(
         actions.append("Run the failing checks again and verify this criterion passes.")
 
     if score >= pass_score and not actions:
-        actions.append(f"Strengthen {criterion_name} with one concrete improvement and re-evaluate.")
+        actions.append(
+            f"Strengthen {criterion_name} with one concrete improvement and re-evaluate."
+        )
 
     deduped_actions: List[str] = []
     seen = set()
@@ -769,7 +796,9 @@ def _derive_improvement_areas(
 
     if wrong_feedback:
         wrong_feedback_sentences = _split_sentences(wrong_feedback)
-        concise_feedback = wrong_feedback_sentences[0] if wrong_feedback_sentences else wrong_feedback
+        concise_feedback = (
+            wrong_feedback_sentences[0] if wrong_feedback_sentences else wrong_feedback
+        )
         return concise_feedback[:220]
 
     evidence_refs = [
@@ -778,7 +807,9 @@ def _derive_improvement_areas(
         if isinstance(item, dict) and str(item.get("reference", "")).strip()
     ]
     evidence_refs = evidence_refs[:3]
-    evidence_text = ", ".join(evidence_refs) if evidence_refs else "the submitted response"
+    evidence_text = (
+        ", ".join(evidence_refs) if evidence_refs else "the submitted response"
+    )
 
     return f"Unresolved gaps in {criterion_name} are visible in {evidence_text}."
 
@@ -796,7 +827,9 @@ def _stabilize_score(
         0.0,
         min(float(pass_score), max_score if max_score > 0 else float(pass_score)),
     )
-    score = max(0.0, min(float(raw_score), max_score if max_score > 0 else float(raw_score)))
+    score = max(
+        0.0, min(float(raw_score), max_score if max_score > 0 else float(raw_score))
+    )
 
     has_wrong = bool(_normalise_text(wrong_feedback))
     has_correct = bool(_normalise_text(correct_feedback))
@@ -882,7 +915,9 @@ def _normalise_scorecard_feedback(
 
     total_score = sum(criterion["score"] for criterion in criteria)
     total_max_score = sum(criterion["max_score"] for criterion in criteria)
-    overall_score = round((total_score / total_max_score) * 100, 2) if total_max_score else 0
+    overall_score = (
+        round((total_score / total_max_score) * 100, 2) if total_max_score else 0
+    )
 
     severity_order = {"high": 0, "medium": 1, "low": 2}
     surfaced_criteria = sorted(
@@ -1057,6 +1092,35 @@ def _extract_latest_user_submission(chat_history: List[Dict]) -> Optional[str]:
     return None
 
 
+def _generate_chat_cache_key(
+    task_id: Optional[int],
+    question_id: Optional[int],
+    user_id: Optional[int],
+    question_details: str,
+    chat_history: List[Dict],
+    user_response: str,
+) -> str:
+    cache_components = [
+        f"task:{task_id}",
+        f"q:{question_id}",
+        f"u:{user_id}",
+    ]
+    if question_details:
+        cache_components.append(
+            f"qd:{hashlib.sha256(question_details.encode()).hexdigest()[:16]}"
+        )
+    if chat_history:
+        history_str = json.dumps(chat_history, sort_keys=True)
+        cache_components.append(
+            f"hist:{hashlib.sha256(history_str.encode()).hexdigest()[:16]}"
+        )
+    if user_response:
+        cache_components.append(
+            f"resp:{hashlib.sha256(user_response.encode()).hexdigest()[:16]}"
+        )
+    return ":".join(cache_components)
+
+
 @router.post("/chat")
 async def ai_response_for_question(request: AIChatRequest):
     # Define an async generator for streaming
@@ -1131,9 +1195,11 @@ async def ai_response_for_question(request: AIChatRequest):
                 and external_code_evidence
                 and isinstance(new_user_message[0]["content"], str)
             ):
-                new_user_message[0]["content"] = _append_external_evidence_to_submission(
-                    new_user_message[0]["content"],
-                    external_code_evidence,
+                new_user_message[0]["content"] = (
+                    _append_external_evidence_to_submission(
+                        new_user_message[0]["content"],
+                        external_code_evidence,
+                    )
                 )
 
             if request.task_type == TaskType.LEARNING_MATERIAL:
@@ -1376,37 +1442,58 @@ async def ai_response_for_question(request: AIChatRequest):
 
             messages += chat_history
 
-            with langfuse.start_as_current_observation(
-                as_type="generation", name="response"
-            ) as observation:
+            cache_key = _generate_chat_cache_key(
+                task_id=request.task_id,
+                question_id=request.question_id,
+                user_id=request.user_id,
+                question_details=question_details,
+                chat_history=chat_history,
+                user_response=request.user_response or "",
+            )
+
+            cached_response_text, cached_model = await get_cached_response(cache_key)
+            if cached_response_text is not None:
+                logging.info("LLM response cache hit", extra={"cache_key": cache_key})
                 try:
-                    async for chunk in stream_llm_with_openai(
-                        model=model,
-                        messages=messages,
-                        response_model=Output,
-                        max_output_tokens=8192,
-                        api_mode=openai_api_mode,
-                    ):
-                        content = json.dumps(chunk.model_dump()) + "\n"
-                        llm_output = chunk.model_dump()
-                        yield content
-                except Exception as e:
-                    # Check if it's the specific AsyncStream aclose error
-                    if str(e) == "'AsyncStream' object has no attribute 'aclose'":
-                        # Silently end partial stream on this specific error
-                        pass
-                    else:
-                        # Re-raise other exceptions
-                        raise
-                finally:
-                    observation.update(
-                        input=llm_input,
-                        output=llm_output,
-                        metadata={
-                            "prompt_name": prompt_name,
-                            **response_metadata,
-                        },
-                    )
+                    cached_data = json.loads(cached_response_text)
+                    yield json.dumps(cached_data) + "\n"
+                except json.JSONDecodeError:
+                    cached_output = {"response": cached_response_text, "cached": True}
+                    yield json.dumps(cached_output) + "\n"
+            else:
+                logging.info("LLM response cache miss", extra={"cache_key": cache_key})
+
+                with langfuse.start_as_current_observation(
+                    as_type="generation", name="response"
+                ) as observation:
+                    try:
+                        async for chunk in stream_llm_with_openai(
+                            model=model,
+                            messages=messages,
+                            response_model=Output,
+                            max_output_tokens=8192,
+                            api_mode=openai_api_mode,
+                        ):
+                            content = json.dumps(chunk.model_dump()) + "\n"
+                            llm_output = chunk.model_dump()
+                            yield content
+                    except Exception as e:
+                        # Check if it's the specific AsyncStream aclose error
+                        if str(e) == "'AsyncStream' object has no attribute 'aclose'":
+                            # Silently end partial stream on this specific error
+                            pass
+                        else:
+                            # Re-raise other exceptions
+                            raise
+                    finally:
+                        observation.update(
+                            input=llm_input,
+                            output=llm_output,
+                            metadata={
+                                "prompt_name": prompt_name,
+                                **response_metadata,
+                            },
+                        )
 
             if (
                 request.task_type == TaskType.QUIZ
@@ -1447,15 +1534,20 @@ async def ai_response_for_question(request: AIChatRequest):
                     llm_output["feedback_output"] = normalized_feedback
                     llm_output["diff_from_previous"] = diff_from_previous
 
-                    yield json.dumps(
-                        {
-                            "attempt_id": attempt_id,
-                            "feedback_output": normalized_feedback,
-                            "diff_from_previous": diff_from_previous,
-                        }
-                    ) + "\n"
+                    yield (
+                        json.dumps(
+                            {
+                                "attempt_id": attempt_id,
+                                "feedback_output": normalized_feedback,
+                                "diff_from_previous": diff_from_previous,
+                            }
+                        )
+                        + "\n"
+                    )
                 except Exception:
-                    logging.exception("Failed to persist normalized feedback for quiz chat")
+                    logging.exception(
+                        "Failed to persist normalized feedback for quiz chat"
+                    )
             elif (
                 request.task_type == TaskType.QUIZ
                 and request.question_id is not None
@@ -1496,15 +1588,28 @@ async def ai_response_for_question(request: AIChatRequest):
                     llm_output["feedback_output"] = normalized_feedback
                     llm_output["diff_from_previous"] = diff_from_previous
 
-                    yield json.dumps(
-                        {
-                            "attempt_id": attempt_id,
-                            "feedback_output": normalized_feedback,
-                            "diff_from_previous": diff_from_previous,
-                        }
-                    ) + "\n"
+                    yield (
+                        json.dumps(
+                            {
+                                "attempt_id": attempt_id,
+                                "feedback_output": normalized_feedback,
+                                "diff_from_previous": diff_from_previous,
+                            }
+                        )
+                        + "\n"
+                    )
                 except Exception:
-                    logging.exception("Failed to persist normalized objective feedback for quiz chat")
+                    logging.exception(
+                        "Failed to persist normalized objective feedback for quiz chat"
+                    )
+
+            if cached_response_text is None and llm_output:
+                try:
+                    response_text = json.dumps(llm_output)
+                    await save_response_to_cache(cache_key, response_text, model)
+                    logging.info("Cached LLM response", extra={"cache_key": cache_key})
+                except Exception:
+                    logging.exception("Failed to cache LLM response")
 
             metadata["output"] = llm_output
             trace.update_trace(
@@ -1619,9 +1724,11 @@ async def ai_response_for_assignment(request: AIChatRequest):
                 and external_code_evidence
                 and isinstance(new_user_message[0]["content"], str)
             ):
-                new_user_message[0]["content"] = _append_external_evidence_to_submission(
-                    new_user_message[0]["content"],
-                    external_code_evidence,
+                new_user_message[0]["content"] = (
+                    _append_external_evidence_to_submission(
+                        new_user_message[0]["content"],
+                        external_code_evidence,
+                    )
                 )
 
             # Build problem statement from blocks
@@ -1853,13 +1960,16 @@ async def ai_response_for_assignment(request: AIChatRequest):
                     llm_output["feedback_output"] = normalized_feedback
                     llm_output["diff_from_previous"] = diff_from_previous
 
-                    yield json.dumps(
-                        {
-                            "attempt_id": attempt_id,
-                            "feedback_output": normalized_feedback,
-                            "diff_from_previous": diff_from_previous,
-                        }
-                    ) + "\n"
+                    yield (
+                        json.dumps(
+                            {
+                                "attempt_id": attempt_id,
+                                "feedback_output": normalized_feedback,
+                                "diff_from_previous": diff_from_previous,
+                            }
+                        )
+                        + "\n"
+                    )
                 except Exception:
                     logging.exception(
                         "Failed to persist normalized feedback for assignment evaluation"
@@ -2199,13 +2309,21 @@ async def _re_evaluate_objective_quiz(
         current_criteria=normalized_feedback["criteria"],
     )
 
-    objective_score = normalized_feedback["criteria"][0]["score"] if normalized_feedback["criteria"] else 0
+    objective_score = (
+        normalized_feedback["criteria"][0]["score"]
+        if normalized_feedback["criteria"]
+        else 0
+    )
     objective_pass_score = 3
     objective_scorecard = {
         "Correctness": {
             "feedback": {
-                "correct": llm_output.get("feedback", "") if objective_score >= objective_pass_score else "",
-                "wrong": "" if objective_score >= objective_pass_score else llm_output.get("feedback", ""),
+                "correct": llm_output.get("feedback", "")
+                if objective_score >= objective_pass_score
+                else "",
+                "wrong": ""
+                if objective_score >= objective_pass_score
+                else llm_output.get("feedback", ""),
             },
             "score": objective_score,
             "max_score": 4,
@@ -2271,7 +2389,9 @@ async def _re_evaluate_assignment(
             detail="Scorecard not found for assignment evaluation criteria",
         )
 
-    chat_history = await get_task_chat_history_for_user(request.task_id, request.user_id)
+    chat_history = await get_task_chat_history_for_user(
+        request.task_id, request.user_id
+    )
 
     latest_submission = request.latest_submission or _extract_latest_user_submission(
         chat_history
@@ -2331,9 +2451,7 @@ async def _re_evaluate_assignment(
         assignment_details += key_areas_section
 
     if evaluation_context:
-        assignment_details += (
-            f"\n\n<Evaluation Criteria>\n\n{evaluation_context}\n\n</Evaluation Criteria>"
-        )
+        assignment_details += f"\n\n<Evaluation Criteria>\n\n{evaluation_context}\n\n</Evaluation Criteria>"
 
     if knowledge_base:
         assignment_details += (
