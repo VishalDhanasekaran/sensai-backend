@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Tuple, Optional, Dict, Literal, Any
 from datetime import datetime
 
@@ -717,6 +717,65 @@ class AIChatRequest(BaseModel):
     user_email: str
     task_id: int
     response_type: Optional[ChatResponseType] = None
+    code_evidence: Optional[List[Dict[str, Any]]] = None
+
+
+class Evidence(BaseModel):
+    type: Literal["code_line", "test_case", "quote", "reasoning_gap"]
+    reference: str
+    description: str
+
+
+class CriterionFeedback(BaseModel):
+    criterion_name: str
+    score: float
+    max_score: float
+    pass_score: float
+    evidence: List[Evidence] = Field(default_factory=list)
+    next_step: str
+    severity: Literal["low", "medium", "high"]
+
+
+class FeedbackOutput(BaseModel):
+    feedback_summary: str
+    criteria: List[CriterionFeedback]
+    overall_score: float
+    attempt_id: Optional[int] = None
+
+
+class FeedbackCriterionDiff(BaseModel):
+    criterion_name: str
+    previous_score: Optional[float] = None
+    current_score: float
+    change: Literal["improved", "regressed", "unchanged", "new"]
+
+
+class FeedbackAttemptSummary(BaseModel):
+    attempt_id: int
+    overall_score: float
+    feedback_summary: str
+    created_at: str
+
+
+class ReevaluateFeedbackRequest(BaseModel):
+    user_id: int
+    user_email: Optional[str] = None
+    task_id: int
+    question_id: Optional[int] = None
+    task_type: TaskType = TaskType.QUIZ
+    latest_submission: Optional[str] = None
+    response_type: Optional[ChatResponseType] = ChatResponseType.TEXT
+    code_evidence: Optional[List[Dict[str, Any]]] = None
+
+
+class ReevaluateFeedbackResponse(BaseModel):
+    attempt_id: int
+    feedback_summary: str
+    overall_score: float
+    criteria: List[CriterionFeedback]
+    diff_from_previous: List[FeedbackCriterionDiff]
+    feedback: Optional[str] = None
+    scorecard: Optional[Dict[str, Any]] = None
 
 
 class MarkTaskCompletedRequest(BaseModel):

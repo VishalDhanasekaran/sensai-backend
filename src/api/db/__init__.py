@@ -32,6 +32,8 @@ from api.config import (
     integrations_table_name,
     assignment_table_name,
     bq_sync_table_name,
+    feedback_attempts_table_name,
+    feedback_items_table_name,
 )
 from api.db.migration import run_migrations
 
@@ -467,6 +469,72 @@ async def create_assignment_table(cursor):
     )
 
 
+async def create_feedback_tables(cursor):
+    await cursor.execute(
+        f"""CREATE TABLE IF NOT EXISTS {feedback_attempts_table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                task_id INTEGER NOT NULL,
+                question_id INTEGER,
+                rubric_version TEXT NOT NULL,
+                rubric_hash TEXT NOT NULL,
+                model_used TEXT,
+                overall_score REAL NOT NULL,
+                feedback_summary TEXT,
+                raw_feedback_json TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                deleted_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES {users_table_name}(id) ON DELETE CASCADE,
+                FOREIGN KEY (task_id) REFERENCES {tasks_table_name}(id) ON DELETE CASCADE,
+                FOREIGN KEY (question_id) REFERENCES {questions_table_name}(id) ON DELETE CASCADE
+            )"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_feedback_attempts_user_id ON {feedback_attempts_table_name} (user_id)"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_feedback_attempts_task_id ON {feedback_attempts_table_name} (task_id)"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_feedback_attempts_question_id ON {feedback_attempts_table_name} (question_id)"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_feedback_attempts_created_at ON {feedback_attempts_table_name} (created_at)"""
+    )
+
+    await cursor.execute(
+        f"""CREATE TABLE IF NOT EXISTS {feedback_items_table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attempt_id INTEGER NOT NULL,
+                criterion_name TEXT NOT NULL,
+                score REAL NOT NULL,
+                max_score REAL NOT NULL,
+                pass_score REAL NOT NULL,
+                evidence_json TEXT,
+                next_step TEXT,
+                severity TEXT NOT NULL,
+                status TEXT DEFAULT 'open',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                deleted_at DATETIME,
+                FOREIGN KEY (attempt_id) REFERENCES {feedback_attempts_table_name}(id) ON DELETE CASCADE
+            )"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_feedback_items_attempt_id ON {feedback_items_table_name} (attempt_id)"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_feedback_items_severity ON {feedback_items_table_name} (severity)"""
+    )
+
+
 async def create_scorecards_table(cursor):
     await cursor.execute(
         f"""CREATE TABLE IF NOT EXISTS {scorecards_table_name} (
@@ -716,6 +784,8 @@ async def init_db():
             await create_integrations_table(cursor)
 
             await create_assignment_table(cursor)
+
+            await create_feedback_tables(cursor)
 
             await create_bq_sync_table(cursor)
 
