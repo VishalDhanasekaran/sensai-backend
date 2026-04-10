@@ -1,5 +1,6 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from api.db.task import publish_scheduled_tasks
+from api.db.prompt_cache import cleanup_old_prompt_cache_stats
 from api.cron import (
     check_memory_and_raise_alert,
 )
@@ -25,7 +26,9 @@ def with_error_reporting(context: str):
             try:
                 return await func(*args, **kwargs)
             except Exception as e:
-                logging.error(f"Error in scheduled task '{context}': {e}", exc_info=True)
+                logging.error(
+                    f"Error in scheduled task '{context}': {e}", exc_info=True
+                )
                 if settings.sentry_dsn:
                     sentry_sdk.capture_exception(e)
                 raise
@@ -46,3 +49,9 @@ async def check_scheduled_tasks():
 @with_error_reporting("memory_check")
 async def check_memory():
     await check_memory_and_raise_alert()
+
+
+@scheduler.scheduled_job("interval", hours=1)
+@with_error_reporting("prompt_cache_cleanup")
+async def cleanup_prompt_cache():
+    await cleanup_old_prompt_cache_stats(hours=48)

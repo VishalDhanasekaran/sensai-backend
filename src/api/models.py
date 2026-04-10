@@ -732,6 +732,7 @@ class CriterionFeedback(BaseModel):
     max_score: float
     pass_score: float
     evidence: List[Evidence] = Field(default_factory=list)
+    improvement_areas: Optional[str] = None
     next_step: str
     severity: Literal["low", "medium", "high"]
 

@@ -71,14 +71,18 @@ class TestRunLlmWithOpenai:
         # Assertions
         assert result == {"response": "test response"}
         mock_async_openai.assert_called_once_with()
-        mock_client.responses.parse.assert_called_once_with(
-            model="gpt-4",
-            input=[{"role": "user", "content": "hello"}],
-            text_format=self.MockResponseModel,
-            max_output_tokens=100,
-            store=True,
-            langfuse_prompt=None,
-        )
+        mock_client.responses.parse.assert_called_once()
+        call_kwargs = mock_client.responses.parse.call_args.kwargs
+        assert call_kwargs["model"] == "gpt-4"
+        assert call_kwargs["input"] == [{"role": "user", "content": "hello"}]
+        assert call_kwargs["text_format"] == self.MockResponseModel
+        assert call_kwargs["max_output_tokens"] == 100
+        assert call_kwargs["store"] is True
+        assert call_kwargs["langfuse_prompt"] is None
+        assert "prompt_cache_retention" not in call_kwargs
+        assert isinstance(call_kwargs["prompt_cache_key"], str)
+        assert call_kwargs["prompt_cache_key"].startswith("pc:")
+        assert len(call_kwargs["prompt_cache_key"]) <= 64
 
 
 # Note: stream_llm_with_openai tests are complex due to async context manager mocking

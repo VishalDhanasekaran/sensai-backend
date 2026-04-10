@@ -490,6 +490,79 @@ def _extract_evidence_from_feedback(feedback_text: str) -> List[Dict]:
     return deduped_evidence[:3]
 
 
+def _merge_evidence_lists(*evidence_groups: List[Dict], limit: int = 5) -> List[Dict]:
+    merged: List[Dict] = []
+    seen_keys = set()
+
+    for group in evidence_groups:
+        for item in group or []:
+            if not isinstance(item, dict):
+                continue
+
+            evidence_type = item.get("type")
+            reference = str(item.get("reference", "")).strip()
+            if not evidence_type or not reference:
+                continue
+
+            key = (evidence_type, reference.lower())
+            if key in seen_keys:
+                continue
+
+            seen_keys.add(key)
+            merged.append(item)
+
+            if len(merged) >= limit:
+                return merged
+
+    return merged
+
+
+def _extract_code_line_evidence_from_submission(
+    submission_text: Optional[str],
+    feedback_text: str,
+) -> List[Dict]:
+    submission_text = (submission_text or "").strip()
+    feedback_text = _normalise_text(feedback_text)
+
+    if not submission_text or not feedback_text:
+        return []
+
+    lines = submission_text.splitlines()
+    if not lines:
+        return []
+
+    keywords = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", feedback_text.lower())
+    keywords = [keyword for keyword in keywords if keyword not in {"line", "test", "case", "score"}]
+
+    if not keywords:
+        return []
+
+    keyword_set = set(keywords[:12])
+    evidence: List[Dict] = []
+
+    for line_index, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        lower_line = stripped.lower()
+        if not any(keyword in lower_line for keyword in keyword_set):
+            continue
+
+        evidence.append(
+            {
+                "type": "code_line",
+                "reference": f"L{line_index}",
+                "description": stripped[:200],
+            }
+        )
+
+        if len(evidence) >= 2:
+            break
+
+    return evidence
+
+
 def _normalise_external_evidence(external_evidence: Optional[List[Dict]]) -> List[Dict]:
     if not external_evidence or not isinstance(external_evidence, list):
         return []
@@ -624,46 +697,161 @@ def _derive_severity(score: float, max_score: float, pass_score: float) -> str:
 def _derive_next_step(
     wrong_feedback: str,
     criterion_name: str,
+    evidence: Optional[List[Dict]],
     score: float,
     pass_score: float,
 ) -> str:
     wrong_feedback = _normalise_text(wrong_feedback)
+    evidence = evidence or []
+
+    by_type: Dict[str, List[str]] = {}
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        evidence_type = str(item.get("type", "")).strip()
+        reference = str(item.get("reference", "")).strip()
+        if not evidence_type or not reference:
+            continue
+        by_type.setdefault(evidence_type, [])
+        if reference not in by_type[evidence_type]:
+            by_type[evidence_type].append(reference)
+
+    actions: List[str] = []
+    feedback_lower = wrong_feedback.lower()
+
+    if "complexity" in feedback_lower or "o(" in feedback_lower:
+        actions.append("Refactor the logic to meet the expected time complexity.")
+    elif "edge case" in feedback_lower or "empty" in feedback_lower or "null" in feedback_lower:
+        actions.append("Add explicit handling for edge-case inputs before main logic.")
+    elif wrong_feedback:
+        focus = _split_sentences(wrong_feedback)
+        if focus:
+            actions.append(f"Revise the solution to resolve: {focus[0][:140].rstrip('.')}.")
+
+    if by_type.get("code_line"):
+        line_refs = ", ".join(by_type["code_line"][:2])
+        actions.append(f"Update implementation around {line_refs}.")
+
+    if by_type.get("test_case"):
+        test_refs = ", ".join(by_type["test_case"][:2])
+        actions.append(f"Rerun and pass {test_refs}.")
+    elif score < pass_score:
+        actions.append("Run the failing checks again and verify this criterion passes.")
+
+    if score >= pass_score and not actions:
+        actions.append(f"Strengthen {criterion_name} with one concrete improvement and re-evaluate.")
+
+    deduped_actions: List[str] = []
+    seen = set()
+    for action in actions:
+        action = _normalise_text(action)
+        if not action:
+            continue
+        key = action.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_actions.append(action)
+
+    if not deduped_actions:
+        return f"Update {criterion_name} against the rubric, then re-evaluate."
+
+    return " ".join(deduped_actions[:2])
+
+
+def _derive_improvement_areas(
+    wrong_feedback: str,
+    criterion_name: str,
+    evidence: Optional[List[Dict]],
+) -> str:
+    wrong_feedback = _normalise_text(wrong_feedback)
+    evidence = evidence or []
 
     if wrong_feedback:
         wrong_feedback_sentences = _split_sentences(wrong_feedback)
-        if wrong_feedback_sentences:
-            return wrong_feedback_sentences[0]
+        concise_feedback = wrong_feedback_sentences[0] if wrong_feedback_sentences else wrong_feedback
+        return concise_feedback[:220]
 
-    if score < pass_score:
-        return (
-            f"Rework {criterion_name} using the evidence above, then resubmit with a clearer explanation."
-        )
+    evidence_refs = [
+        str(item.get("reference", "")).strip()
+        for item in evidence
+        if isinstance(item, dict) and str(item.get("reference", "")).strip()
+    ]
+    evidence_refs = evidence_refs[:3]
+    evidence_text = ", ".join(evidence_refs) if evidence_refs else "the submitted response"
 
-    return f"Keep strengthening {criterion_name} with one concrete example from your response."
+    return f"Unresolved gaps in {criterion_name} are visible in {evidence_text}."
+
+
+def _stabilize_score(
+    *,
+    raw_score: float,
+    max_score: float,
+    pass_score: float,
+    wrong_feedback: str,
+    correct_feedback: str,
+) -> float:
+    max_score = max(0.0, float(max_score))
+    pass_score = max(
+        0.0,
+        min(float(pass_score), max_score if max_score > 0 else float(pass_score)),
+    )
+    score = max(0.0, min(float(raw_score), max_score if max_score > 0 else float(raw_score)))
+
+    has_wrong = bool(_normalise_text(wrong_feedback))
+    has_correct = bool(_normalise_text(correct_feedback))
+
+    # Enforce score/feedback consistency while preserving model granularity.
+    if not has_wrong and has_correct:
+        score = max(score, pass_score if max_score > 0 else score)
+    elif has_wrong and not has_correct:
+        score = min(score, max(0.0, pass_score - 0.01))
+    elif not has_wrong and not has_correct:
+        score = max(score, max_score if max_score > 0 else score)
+
+    return round(score, 2)
 
 
 def _normalise_scorecard_feedback(
     feedback_summary: str,
     scorecard: Dict,
     external_evidence: Optional[List[Dict]] = None,
+    submission_text: Optional[str] = None,
 ) -> Dict:
     criteria = []
 
     for criterion_name, criterion_data in scorecard.items():
         feedback = criterion_data.get("feedback", {}) or {}
-        score = float(criterion_data.get("score", 0))
+        raw_score = float(criterion_data.get("score", 0))
         max_score = float(criterion_data.get("max_score", 0))
         pass_score = float(criterion_data.get("pass_score", max_score))
 
         wrong_feedback = _normalise_text(feedback.get("wrong"))
         correct_feedback = _normalise_text(feedback.get("correct"))
+        score = _stabilize_score(
+            raw_score=raw_score,
+            max_score=max_score,
+            pass_score=pass_score,
+            wrong_feedback=wrong_feedback,
+            correct_feedback=correct_feedback,
+        )
 
         evidence_source = wrong_feedback or correct_feedback or feedback_summary
-        evidence = _extract_evidence_from_feedback(evidence_source)
+        feedback_evidence = _extract_evidence_from_feedback(evidence_source)
+        line_evidence = _extract_code_line_evidence_from_submission(
+            submission_text,
+            evidence_source,
+        )
+        evidence = _merge_evidence_lists(
+            line_evidence,
+            feedback_evidence,
+            limit=3,
+        )
 
         next_step = _derive_next_step(
             wrong_feedback,
             criterion_name,
+            evidence,
             score,
             pass_score,
         )
@@ -677,6 +865,11 @@ def _normalise_scorecard_feedback(
                 "max_score": max_score,
                 "pass_score": pass_score,
                 "evidence": evidence,
+                "improvement_areas": _derive_improvement_areas(
+                    wrong_feedback,
+                    criterion_name,
+                    evidence,
+                ),
                 "next_step": next_step,
                 "severity": severity,
             }
@@ -706,6 +899,56 @@ def _normalise_scorecard_feedback(
         "overall_score": overall_score,
         "surfaced_criteria": surfaced_criteria,
     }
+
+
+def _build_objective_rubric() -> Dict:
+    return {
+        "criteria": [
+            {
+                "name": "Correctness",
+                "description": "Response correctness against the reference solution.",
+                "min_score": 0,
+                "max_score": 4,
+                "pass_score": 3,
+            }
+        ]
+    }
+
+
+def _normalise_objective_feedback(
+    *,
+    feedback_summary: str,
+    is_correct: bool,
+    objective_score: Optional[float] = None,
+    submission_text: Optional[str] = None,
+    external_evidence: Optional[List[Dict]] = None,
+) -> Dict:
+    if objective_score is None:
+        derived_score = 4 if is_correct else 0
+    else:
+        derived_score = max(0.0, min(4.0, float(objective_score)))
+        if is_correct and derived_score < 3:
+            derived_score = 3.0
+        if not is_correct and derived_score >= 3:
+            derived_score = 2.99
+
+    scorecard = {
+        "Correctness": {
+            "feedback": {
+                "correct": feedback_summary if is_correct else "",
+                "wrong": "" if is_correct else feedback_summary,
+            },
+            "score": derived_score,
+            "max_score": 4,
+            "pass_score": 3,
+        }
+    }
+    return _normalise_scorecard_feedback(
+        feedback_summary=feedback_summary,
+        scorecard=scorecard,
+        external_evidence=external_evidence,
+        submission_text=submission_text,
+    )
 
 
 def _build_rubric_metadata(rubric: Dict) -> Dict:
@@ -1031,6 +1274,9 @@ async def ai_response_for_question(request: AIChatRequest):
                         is_correct: bool = Field(
                             description="Whether the student's response correctly solves the original task that the student is supposed to solve. For this to be true, the original task needs to be completely solved and not just partially solved. Giving the right answer to one step of the task does not count as solving the entire task."
                         )
+                        score: float = Field(
+                            description="Criterion score for correctness in range [0, 4] based on how complete and accurate the response is."
+                        )
 
                 else:
 
@@ -1175,6 +1421,7 @@ async def ai_response_for_question(request: AIChatRequest):
                         feedback_summary=llm_output.get("feedback", ""),
                         scorecard=llm_output["scorecard"],
                         external_evidence=external_code_evidence,
+                        submission_text=request.user_response,
                     )
 
                     attempt_id = await _persist_feedback_attempt(
@@ -1209,6 +1456,55 @@ async def ai_response_for_question(request: AIChatRequest):
                     ) + "\n"
                 except Exception:
                     logging.exception("Failed to persist normalized feedback for quiz chat")
+            elif (
+                request.task_type == TaskType.QUIZ
+                and request.question_id is not None
+                and question["type"] == QuestionType.OBJECTIVE
+                and isinstance(llm_output, dict)
+                and isinstance(llm_output.get("feedback"), str)
+                and "is_correct" in llm_output
+            ):
+                try:
+                    normalized_feedback = _normalise_objective_feedback(
+                        feedback_summary=llm_output.get("feedback", ""),
+                        is_correct=bool(llm_output.get("is_correct")),
+                        objective_score=llm_output.get("score"),
+                        submission_text=request.user_response,
+                        external_evidence=external_code_evidence,
+                    )
+
+                    attempt_id = await _persist_feedback_attempt(
+                        user_id=request.user_id,
+                        task_id=request.task_id,
+                        question_id=request.question_id,
+                        model_used=model,
+                        rubric=_build_objective_rubric(),
+                        normalized_feedback=normalized_feedback,
+                    )
+
+                    normalized_feedback["attempt_id"] = attempt_id
+
+                    diff_from_previous = await _build_diff_from_previous_attempt(
+                        user_id=request.user_id,
+                        task_id=request.task_id,
+                        question_id=request.question_id,
+                        current_attempt_id=attempt_id,
+                        current_criteria=normalized_feedback["criteria"],
+                    )
+
+                    llm_output["attempt_id"] = attempt_id
+                    llm_output["feedback_output"] = normalized_feedback
+                    llm_output["diff_from_previous"] = diff_from_previous
+
+                    yield json.dumps(
+                        {
+                            "attempt_id": attempt_id,
+                            "feedback_output": normalized_feedback,
+                            "diff_from_previous": diff_from_previous,
+                        }
+                    ) + "\n"
+                except Exception:
+                    logging.exception("Failed to persist normalized objective feedback for quiz chat")
 
             metadata["output"] = llm_output
             trace.update_trace(
@@ -1531,6 +1827,7 @@ async def ai_response_for_assignment(request: AIChatRequest):
                         feedback_summary=llm_output.get("feedback", ""),
                         scorecard=llm_output["key_area_scores"],
                         external_evidence=external_code_evidence,
+                        submission_text=request.user_response,
                     )
 
                     attempt_id = await _persist_feedback_attempt(
@@ -1736,6 +2033,7 @@ async def _re_evaluate_subjective_quiz(
         feedback_summary=llm_output.get("feedback", ""),
         scorecard=llm_output["scorecard"],
         external_evidence=external_code_evidence,
+        submission_text=latest_submission,
     )
 
     attempt_id = await _persist_feedback_attempt(
@@ -1765,6 +2063,164 @@ async def _re_evaluate_subjective_quiz(
         "diff_from_previous": diff_from_previous,
         "feedback": llm_output.get("feedback"),
         "scorecard": llm_output.get("scorecard"),
+    }
+
+
+async def _re_evaluate_objective_quiz(
+    request: ReevaluateFeedbackRequest,
+) -> Dict:
+    if request.question_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="question_id is required for quiz re-evaluation",
+        )
+
+    question = await get_question(request.question_id)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if question["type"] != QuestionType.OBJECTIVE:
+        raise HTTPException(
+            status_code=400,
+            detail="Question is not an objective question",
+        )
+
+    chat_history = await get_question_chat_history_for_user(
+        request.question_id,
+        request.user_id,
+    )
+
+    latest_submission = request.latest_submission or _extract_latest_user_submission(
+        chat_history
+    )
+
+    if not latest_submission:
+        raise HTTPException(
+            status_code=400,
+            detail="No learner submission found for re-evaluation",
+        )
+
+    external_code_evidence = _normalise_external_evidence(request.code_evidence)
+
+    prompt_chat_history = [
+        {
+            "role": message["role"],
+            "content": message["content"],
+        }
+        for message in chat_history
+    ]
+
+    for message in prompt_chat_history:
+        if message["role"] != "assistant":
+            continue
+
+        message["content"] = get_ai_message_for_chat_history(message["content"])
+
+    prompt_chat_history.append(
+        {
+            "role": "user",
+            "content": _append_external_evidence_to_submission(
+                latest_submission,
+                external_code_evidence,
+            ),
+        }
+    )
+
+    question_description = construct_description_from_blocks(question["blocks"])
+    question_details = f"**Task**\n\n{question_description}\n\n"
+
+    answer_as_prompt = construct_description_from_blocks(question["answer"])
+    question_details += (
+        "---\n\n**Reference Solution (never to be shared with the learner)**\n\n"
+        f"{answer_as_prompt}\n\n"
+    )
+
+    knowledge_base = await build_knowledge_base_from_context(question.get("context"))
+    if knowledge_base:
+        question_details += f"---\n\n**Knowledge Base**\n\n{knowledge_base}\n\n"
+
+    class ObjectiveOutput(BaseModel):
+        analysis: str = Field(
+            description="A detailed analysis of the student's response",
+        )
+        feedback: str = Field(
+            description="Feedback on the student's response",
+        )
+        is_correct: bool = Field(
+            description="Whether the student's response correctly solves the task",
+        )
+        score: float = Field(
+            description="Criterion score for correctness in range [0, 4] based on completeness and accuracy.",
+        )
+
+    user_details = await get_user_details_for_prompt(request.user_id)
+    messages = compile_prompt(
+        OBJECTIVE_QUESTION_SYSTEM_PROMPT,
+        OBJECTIVE_QUESTION_USER_PROMPT,
+        task_details=question_details,
+        user_details=user_details,
+    )
+    messages += prompt_chat_history
+
+    model = await get_model_for_task(prompt_chat_history, question_details)
+
+    llm_output = await run_llm_with_openai(
+        model=model,
+        messages=messages,
+        response_model=ObjectiveOutput,
+        max_output_tokens=8192,
+    )
+    llm_output = llm_output.model_dump()
+
+    normalized_feedback = _normalise_objective_feedback(
+        feedback_summary=llm_output.get("feedback", ""),
+        is_correct=bool(llm_output.get("is_correct")),
+        objective_score=llm_output.get("score"),
+        submission_text=latest_submission,
+        external_evidence=external_code_evidence,
+    )
+
+    attempt_id = await _persist_feedback_attempt(
+        user_id=request.user_id,
+        task_id=request.task_id,
+        question_id=request.question_id,
+        model_used=model,
+        rubric=_build_objective_rubric(),
+        normalized_feedback=normalized_feedback,
+    )
+
+    normalized_feedback["attempt_id"] = attempt_id
+
+    diff_from_previous = await _build_diff_from_previous_attempt(
+        user_id=request.user_id,
+        task_id=request.task_id,
+        question_id=request.question_id,
+        current_attempt_id=attempt_id,
+        current_criteria=normalized_feedback["criteria"],
+    )
+
+    objective_score = normalized_feedback["criteria"][0]["score"] if normalized_feedback["criteria"] else 0
+    objective_pass_score = 3
+    objective_scorecard = {
+        "Correctness": {
+            "feedback": {
+                "correct": llm_output.get("feedback", "") if objective_score >= objective_pass_score else "",
+                "wrong": "" if objective_score >= objective_pass_score else llm_output.get("feedback", ""),
+            },
+            "score": objective_score,
+            "max_score": 4,
+            "pass_score": objective_pass_score,
+        }
+    }
+
+    return {
+        "attempt_id": attempt_id,
+        "feedback_summary": normalized_feedback["feedback_summary"],
+        "overall_score": normalized_feedback["overall_score"],
+        "criteria": normalized_feedback["criteria"],
+        "diff_from_previous": diff_from_previous,
+        "feedback": llm_output.get("feedback"),
+        "scorecard": objective_scorecard,
     }
 
 
@@ -1968,6 +2424,7 @@ async def _re_evaluate_assignment(
         feedback_summary=llm_output.get("feedback", ""),
         scorecard=llm_output["key_area_scores"],
         external_evidence=external_code_evidence,
+        submission_text=latest_submission,
     )
 
     attempt_id = await _persist_feedback_attempt(
@@ -2005,6 +2462,19 @@ async def re_evaluate_feedback(
     request: ReevaluateFeedbackRequest,
 ) -> ReevaluateFeedbackResponse:
     if request.task_type == TaskType.QUIZ:
+        if request.question_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="question_id is required for quiz re-evaluation",
+            )
+
+        question = await get_question(request.question_id)
+        if not question:
+            raise HTTPException(status_code=404, detail="Question not found")
+
+        if question["type"] == QuestionType.OBJECTIVE:
+            return await _re_evaluate_objective_quiz(request)
+
         return await _re_evaluate_subjective_quiz(request)
 
     if request.task_type == TaskType.ASSIGNMENT:

@@ -1,4 +1,6 @@
-from typing import Optional, Type, Literal
+from typing import Optional, Type, Literal, Any
+import hashlib
+import json
 import backoff
 from langfuse.openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -9,9 +11,124 @@ from langchain_core.output_parsers import PydanticOutputParser
 import openai
 import instructor
 from api.utils.logging import logger
+from api.db.prompt_cache import log_prompt_cache_stat
 
-# Test log message
-logger.info("Logging system initialized")
+def _stable_hash_payload(payload: Any) -> str:
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+MAX_PROMPT_CACHE_KEY_LENGTH = 64
+
+
+def _default_prompt_cache_key(model: str, api_mode: str, messages: list[dict]) -> str:
+    """
+    Build a deterministic cache key for each logical request.
+
+    OpenAI enforces a maximum length of 64 characters for `prompt_cache_key`.
+    """
+    digest = _stable_hash_payload(
+        {
+            "model": model,
+            "api_mode": api_mode,
+            "messages": messages,
+        }
+    )
+    # Keep a stable, short prefix for easier log filtering.
+    return f"pc:{digest}"[:MAX_PROMPT_CACHE_KEY_LENGTH]
+
+
+def _normalize_prompt_cache_key(cache_key: str | None) -> str | None:
+    if cache_key is None:
+        return None
+
+    if len(cache_key) <= MAX_PROMPT_CACHE_KEY_LENGTH:
+        return cache_key
+
+    # If caller supplies a longer key, fold it deterministically to 64 chars.
+    return f"pcu:{_stable_hash_payload(cache_key)}"[:MAX_PROMPT_CACHE_KEY_LENGTH]
+
+
+def _log_cached_tokens(response: Any, model: str, prompt_cache_key: str | None = None):
+    usage = getattr(response, "usage", None)
+    if not usage:
+        return
+
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    prompt_tokens_details = getattr(usage, "prompt_tokens_details", None)
+    cached_tokens_raw = None
+    if prompt_tokens_details:
+        cached_tokens_raw = getattr(prompt_tokens_details, "cached_tokens", None)
+
+    cached_tokens = cached_tokens_raw if isinstance(cached_tokens_raw, int) else None
+    is_hit = cached_tokens is not None and cached_tokens > 0
+
+    if is_hit:
+        logger.info(
+            "OpenAI prompt cache hit",
+            extra={
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "cached_tokens": cached_tokens,
+                "prompt_cache_key": prompt_cache_key,
+            },
+        )
+    else:
+        logger.info(
+            "OpenAI prompt cache miss",
+            extra={
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "prompt_cache_key": prompt_cache_key,
+            },
+        )
+
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    loop.create_task(
+        log_prompt_cache_stat(
+            cache_key=prompt_cache_key or "",
+            model=model,
+            is_hit=is_hit,
+            prompt_tokens=prompt_tokens,
+            cached_tokens=cached_tokens,
+        )
+    )
+
+
+def _prepare_api_kwargs(
+    model: str,
+    api_mode: Literal["responses", "chat_completions"],
+    messages: list[dict],
+    prompt_cache_retention: Literal["in_memory", "24h"],
+    kwargs: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    """
+    Build kwargs for OpenAI calls.
+
+    Notes:
+    - Langfuse/OpenAI wrappers can reject `prompt_cache_retention` for
+      `responses.parse/stream` even when prompt caching is otherwise enabled.
+    - We therefore only pass `prompt_cache_key` for Responses API.
+    """
+    api_kwargs = dict(kwargs)
+
+    user_cache_key = _normalize_prompt_cache_key(api_kwargs.pop("prompt_cache_key", None))
+    api_kwargs.pop("prompt_cache_retention", None)
+
+    prompt_cache_key: str | None = None
+    if api_mode == "responses":
+        prompt_cache_key = user_cache_key or _default_prompt_cache_key(
+            model, api_mode, messages
+        )
+        api_kwargs["prompt_cache_key"] = prompt_cache_key
+
+    return api_kwargs, prompt_cache_key
 
 
 def is_reasoning_model(model: str) -> bool:
@@ -74,6 +191,7 @@ async def stream_llm_with_openai(
     response_model: BaseModel,
     max_output_tokens: int,
     api_mode: Literal["responses", "chat_completions"] = "responses",
+    prompt_cache_retention: Literal["in_memory", "24h"] = "in_memory",
     **kwargs,
 ):
     client = AsyncOpenAI()
@@ -83,6 +201,14 @@ async def stream_llm_with_openai(
     if not kwargs and not is_reasoning_model(model):
         kwargs["temperature"] = 0
 
+    api_kwargs, prompt_cache_key = _prepare_api_kwargs(
+        model=model,
+        api_mode=api_mode,
+        messages=messages,
+        prompt_cache_retention=prompt_cache_retention,
+        kwargs=kwargs,
+    )
+
     if api_mode == "responses":
         stream = client.responses.stream(
             model=model,
@@ -91,7 +217,7 @@ async def stream_llm_with_openai(
             max_output_tokens=max_output_tokens,
             store=True,
             metadata={},
-            **kwargs,
+            **api_kwargs,
         )
     else:
         if "-audio-" in model:
@@ -108,7 +234,7 @@ async def stream_llm_with_openai(
                 messages=messages,
                 response_model=response_model,
                 max_completion_tokens=max_output_tokens,
-                **kwargs,
+                **api_kwargs,
             ):
                 yield stream
 
@@ -121,7 +247,7 @@ async def stream_llm_with_openai(
                 max_completion_tokens=max_output_tokens,
                 store=True,
                 n=1,
-                **kwargs,
+                **api_kwargs,
             )
 
     async with stream as stream:
@@ -191,12 +317,21 @@ async def run_llm_with_openai(
     response_model: BaseModel,
     max_output_tokens: int,
     api_mode: Literal["responses", "chat_completions"] = "responses",
+    prompt_cache_retention: Literal["in_memory", "24h"] = "in_memory",
     **kwargs,
 ):
     client = AsyncOpenAI()
 
     if not kwargs and not is_reasoning_model(model):
         kwargs["temperature"] = 0
+
+    api_kwargs, prompt_cache_key = _prepare_api_kwargs(
+        model=model,
+        api_mode=api_mode,
+        messages=messages,
+        prompt_cache_retention=prompt_cache_retention,
+        kwargs=kwargs,
+    )
 
     if api_mode == "responses":
         response = await client.responses.parse(
@@ -205,9 +340,10 @@ async def run_llm_with_openai(
             text_format=response_model,
             max_output_tokens=max_output_tokens,
             store=True,
-            **kwargs,
+            **api_kwargs,
         )
 
+        _log_cached_tokens(response, model, prompt_cache_key)
         return response.output_parsed
 
     if "-audio-" in model:
@@ -216,9 +352,10 @@ async def run_llm_with_openai(
             messages=messages,
             max_completion_tokens=max_output_tokens,
             store=True,
-            **kwargs,
+            **api_kwargs,
         )
 
+        _log_cached_tokens(response, model, prompt_cache_key)
         return response.choices[0].message.content
 
     response = await client.chat.completions.parse(
@@ -227,7 +364,8 @@ async def run_llm_with_openai(
         response_format=response_model,
         max_completion_tokens=max_output_tokens,
         store=True,
-        **kwargs,
+        **api_kwargs,
     )
 
+    _log_cached_tokens(response, model, prompt_cache_key)
     return response.choices[0].message.parsed

@@ -62,6 +62,7 @@ bq_sync_table_name = "bq_sync"
 assignment_table_name = "assignment"
 feedback_attempts_table_name = "feedback_attempts"
 feedback_items_table_name = "feedback_items"
+prompt_cache_stats_table_name = "prompt_cache_stats"
 
 UPLOAD_FOLDER_NAME = "uploads"
 

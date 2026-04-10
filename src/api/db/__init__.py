@@ -34,6 +34,7 @@ from api.config import (
     bq_sync_table_name,
     feedback_attempts_table_name,
     feedback_items_table_name,
+    prompt_cache_stats_table_name,
 )
 from api.db.migration import run_migrations
 
@@ -715,6 +716,28 @@ async def create_code_drafts_table(cursor):
     )
 
 
+async def create_prompt_cache_stats_table(cursor):
+    await cursor.execute(
+        f"""CREATE TABLE IF NOT EXISTS {prompt_cache_stats_table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cache_key TEXT NOT NULL,
+                model TEXT NOT NULL,
+                is_hit BOOLEAN NOT NULL,
+                prompt_tokens INTEGER,
+                cached_tokens INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_prompt_cache_stats_cache_key ON {prompt_cache_stats_table_name} (cache_key)"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_prompt_cache_stats_created_at ON {prompt_cache_stats_table_name} (created_at)"""
+    )
+
+
 async def init_db():
     # Ensure the database folder exists
     db_folder = os.path.dirname(sqlite_db_path)
@@ -786,6 +809,8 @@ async def init_db():
             await create_assignment_table(cursor)
 
             await create_feedback_tables(cursor)
+
+            await create_prompt_cache_stats_table(cursor)
 
             await create_bq_sync_table(cursor)
 
