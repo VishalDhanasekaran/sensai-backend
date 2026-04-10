@@ -11,7 +11,7 @@ class UserLoginData(BaseModel):
     id_token: str  # Google authentication token
 
 
-class CreateOrganizationRequest(BaseModel):
+class CreateOrganizationRequest(BaseModel):  
     name: str
     slug: str
     user_id: int
