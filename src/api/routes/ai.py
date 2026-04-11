@@ -220,6 +220,7 @@ async def get_model_for_task(
     question_details: str,
     user_id: str = None,
     is_root_trace: bool = False,
+    response_cache_read: bool = True,
 ):
     class Output(BaseModel):
         chain_of_thought: str = Field(
@@ -242,6 +243,7 @@ async def get_model_for_task(
         messages=messages,
         response_model=Output,
         max_output_tokens=4096,
+        response_cache_read=response_cache_read,
     )
 
     use_reasoning_model = router_output.use_reasoning_model
@@ -2121,7 +2123,9 @@ async def _re_evaluate_subjective_quiz(
     )
     messages += prompt_chat_history
 
-    model = await get_model_for_task(prompt_chat_history, question_details)
+    model = await get_model_for_task(
+        prompt_chat_history, question_details, response_cache_read=False
+    )
     output_model = _build_subjective_output_model(question["scorecard"])
 
     llm_output = await run_llm_with_openai(
@@ -2129,6 +2133,7 @@ async def _re_evaluate_subjective_quiz(
         messages=messages,
         response_model=output_model,
         max_output_tokens=8192,
+        response_cache_read=False,
     )
 
     llm_output = llm_output.model_dump()
@@ -2272,13 +2277,16 @@ async def _re_evaluate_objective_quiz(
     )
     messages += prompt_chat_history
 
-    model = await get_model_for_task(prompt_chat_history, question_details)
+    model = await get_model_for_task(
+        prompt_chat_history, question_details, response_cache_read=False
+    )
 
     llm_output = await run_llm_with_openai(
         model=model,
         messages=messages,
         response_model=ObjectiveOutput,
         max_output_tokens=8192,
+        response_cache_read=False,
     )
     llm_output = llm_output.model_dump()
 
@@ -2528,6 +2536,7 @@ async def _re_evaluate_assignment(
         messages=messages,
         response_model=Output,
         max_output_tokens=8192,
+        response_cache_read=False,
     )
 
     llm_output = llm_output.model_dump()

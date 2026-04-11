@@ -336,11 +336,12 @@ async def run_llm_with_openai(
     max_output_tokens: int,
     api_mode: Literal["responses", "chat_completions"] = "responses",
     prompt_cache_retention: Literal["in_memory", "24h"] = "in_memory",
+    response_cache_read: bool = True,
     **kwargs,
 ):
     user_cache_key = _get_user_message_cache_key(messages)
 
-    if user_cache_key:
+    if response_cache_read and user_cache_key:
         cached_response_text, cached_model = await get_cached_response(user_cache_key)
         if cached_response_text is not None:
             logger.info(
